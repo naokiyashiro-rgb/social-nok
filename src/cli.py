@@ -55,9 +55,18 @@ def publisher_tick_cmd(args):
     init_db(conn)
     conn.close()
 
-    publisher = Publisher(db_path, dry_run=args.dry_run)
+    from .xclient import XClient
 
-    if args.live:
+    # Initialize X client
+    try:
+        xclient = XClient(dry_run=args.dry_run)
+    except Exception as e:
+        print(f"❌ XClient initialization failed: {str(e)}")
+        return 1
+
+    publisher = Publisher(db_path, xclient=xclient, dry_run=args.dry_run)
+
+    if args.live and not args.dry_run:
         print("🔴 LIVE MODE - Posts will be sent to X API")
     else:
         print("🟢 DRY-RUN MODE - No actual posts sent")
@@ -111,6 +120,37 @@ def status_cmd(args):
     conn.close()
 
 
+def auth_cmd(args):
+    """Check X API credentials."""
+    from .xclient import XClient
+
+    try:
+        xclient = XClient(dry_run=False)
+    except Exception as e:
+        print(f"❌ XClient initialization failed: {str(e)}")
+        print(f"   Make sure X_API_BEARER_TOKEN is set in .env")
+        return 1
+
+    db_path = args.db
+    publisher = Publisher(db_path, xclient=xclient, dry_run=False)
+
+    print("🔐 Verifying X API credentials...")
+    print()
+
+    success, message = publisher.verify_credentials()
+
+    if success:
+        print(f"✅ {message}")
+        user = xclient.get_authenticated_user()
+        print(f"   User ID: {user.get('id')}")
+        print(f"   Username: @{user.get('username')}")
+        print(f"   Name: {user.get('name', 'N/A')}")
+        return 0
+    else:
+        print(f"❌ {message}")
+        return 1
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description='NOK Social Posting Pipeline')
@@ -142,6 +182,10 @@ def main():
     status_parser = subparsers.add_parser('status', help='Show posting status')
     status_parser.set_defaults(func=status_cmd)
 
+    # auth command
+    auth_parser = subparsers.add_parser('auth', help='Check X API credentials')
+    auth_parser.set_defaults(func=auth_cmd)
+
     args = parser.parse_args()
 
     if not hasattr(args, 'func'):
@@ -149,7 +193,10 @@ def main():
         sys.exit(1)
 
     try:
-        args.func(args)
+        result = args.func(args)
+        if result is None:
+            result = 0
+        sys.exit(result)
     except Exception as e:
         print(f"❌ Error: {str(e)}", file=sys.stderr)
         sys.exit(1)

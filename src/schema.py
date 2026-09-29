@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS post_details (
     post_id TEXT NOT NULL,
     part_number INTEGER NOT NULL,
     text TEXT NOT NULL,
+    x_post_id TEXT UNIQUE,
     created_at TEXT NOT NULL,
     FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
     UNIQUE (post_id, part_number)

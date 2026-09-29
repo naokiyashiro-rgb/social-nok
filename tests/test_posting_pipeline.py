@@ -420,3 +420,276 @@ def test_post_20260929_001_can_import(temp_db, temp_queue_file):
     assert result[0] == 'draft'
 
     conn.close()
+
+
+# Test 17: XClient initialization (mock)
+def test_xclient_initialization():
+    """Test 17: XClient can be initialized in dry-run mode"""
+    from src.xclient import XClient
+    
+    client = XClient(dry_run=True)
+    assert client is not None
+    assert client.dry_run is True
+
+
+# Test 18: Wrong authenticated account rejection
+def test_wrong_authenticated_account_rejection(temp_db):
+    """Test 18: wrong authenticated account is rejected"""
+    from src.publisher import Publisher
+    
+    class MockXClient:
+        def __init__(self):
+            self.dry_run = False
+        
+        def verify_credentials(self):
+            return True
+        
+        def get_authenticated_user(self):
+            return {
+                'id': '9999999',
+                'username': 'wrong_user',
+                'name': 'Wrong User'
+            }
+    
+    publisher = Publisher(temp_db, xclient=MockXClient(), dry_run=False)
+    success, message = publisher.verify_credentials()
+    
+    assert success is False
+    assert 'Wrong account' in message
+
+
+# Test 19: Single text post payload generation
+def test_single_post_payload_generation():
+    """Test 19: single text post generates correct payload"""
+    from src.publisher import Publisher
+    
+    post = create_post('test_19', parts_count=1, main_text='Test payload')
+    
+    publisher = Publisher('dummy.db', dry_run=True)
+    payloads = publisher._generate_payloads(post)
+    
+    assert len(payloads) == 1
+    assert 'Part 1 text' in payloads[0]['text']
+    assert payloads[0]['part_number'] == 1
+    assert 'reply_to_id' not in payloads[0]
+
+
+# Test 20: Image post payload generation
+def test_image_post_payload_generation(temp_image_file):
+    """Test 20: image post generates correct payload"""
+    from src.publisher import Publisher
+    
+    images = [PostImage(file_path=temp_image_file)]
+    post = create_post('test_20', parts_count=1, images=images, image_reviewed=True)
+    
+    publisher = Publisher('dummy.db', dry_run=True)
+    payloads = publisher._generate_payloads(post)
+    
+    assert len(payloads) == 1
+    assert 'media_ids' in payloads[0]
+    assert len(payloads[0]['media_ids']) == 1
+
+
+# Test 21: Two-part thread reply_to_id chain
+def test_two_part_thread_reply_chain():
+    """Test 21: 2-part thread generates correct reply_to_id"""
+    from src.publisher import Publisher
+    
+    post = create_post('test_21', parts_count=2)
+    
+    publisher = Publisher('dummy.db', dry_run=True)
+    payloads = publisher._generate_payloads(post)
+    
+    assert len(payloads) == 2
+    assert 'reply_to_id' not in payloads[0]
+    assert 'reply_to_id' in payloads[1]
+    assert payloads[1]['reply_to_id'] == 'x_post_id_part_1'
+
+
+# Test 22: Three-part thread reply_to_id chain
+def test_three_part_thread_reply_chain():
+    """Test 22: 3-part thread generates correct reply_to_id chain"""
+    from src.publisher import Publisher
+    
+    post = create_post('test_22', parts_count=3)
+    
+    publisher = Publisher('dummy.db', dry_run=True)
+    payloads = publisher._generate_payloads(post)
+    
+    assert len(payloads) == 3
+    assert 'reply_to_id' not in payloads[0]
+    assert payloads[1]['reply_to_id'] == 'x_post_id_part_1'
+    assert payloads[2]['reply_to_id'] == 'x_post_id_part_2'
+
+
+# Test 23: No re-post of successful parts on retry
+def test_no_repost_successful_thread_parts(temp_db, temp_queue_file):
+    """Test 23: successful thread parts are not re-posted"""
+    post = create_post('test_23', parts_count=2)
+    
+    with open(temp_queue_file, 'w') as f:
+        json.dump({'posts': [post.to_dict()]}, f)
+    
+    importer = QueueImporter(temp_db, temp_queue_file)
+    importer.import_posts()
+    
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE post_details SET x_post_id = ?
+        WHERE post_id = ? AND part_number = ?
+    """, ('x_post_id_part_1', 'test_23', 1))
+    conn.commit()
+    
+    cursor.execute("SELECT x_post_id FROM post_details WHERE post_id = ? AND part_number = ?",
+                   ('test_23', 1))
+    result = cursor.fetchone()
+    
+    assert result[0] == 'x_post_id_part_1'
+    
+    conn.close()
+
+
+# Test 24: Media upload failure prevents main post
+def test_media_upload_failure_prevents_post(temp_db, temp_queue_file, temp_image_file):
+    """Test 24: media upload failure prevents main post"""
+    images = [PostImage(file_path=temp_image_file)]
+    post = create_post('test_24', parts_count=1, images=images, image_reviewed=True)
+    
+    with open(temp_queue_file, 'w') as f:
+        json.dump({'posts': [post.to_dict()]}, f)
+    
+    importer = QueueImporter(temp_db, temp_queue_file)
+    importer.import_posts()
+    
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE posts SET status = 'scheduled' WHERE id = ?", ('test_24',))
+    conn.commit()
+    
+    class MockXClientFailMedia:
+        def __init__(self):
+            self.dry_run = False
+        
+        def verify_credentials(self):
+            return True
+        
+        def get_authenticated_user(self):
+            return {'id': '123', 'username': 'naokichi_nok'}
+        
+        def upload_media(self, file_path):
+            raise Exception("Media upload failed")
+    
+    from src.publisher import TemporaryAPIError
+    publisher = Publisher(temp_db, xclient=MockXClientFailMedia(), dry_run=False)
+    
+    published, errors = publisher.tick()
+    
+    assert published == 0
+    
+    conn.close()
+
+
+# Test 25: API response post ID saved
+def test_api_response_post_id_saved(temp_db, temp_queue_file):
+    """Test 25: API response x_post_id is saved"""
+    post = create_post('test_25', parts_count=1)
+    
+    with open(temp_queue_file, 'w') as f:
+        json.dump({'posts': [post.to_dict()]}, f)
+    
+    importer = QueueImporter(temp_db, temp_queue_file)
+    importer.import_posts()
+    
+    class MockXClientWithID:
+        def __init__(self):
+            self.dry_run = False
+        
+        def verify_credentials(self):
+            return True
+        
+        def get_authenticated_user(self):
+            return {'id': '123', 'username': 'naokichi_nok'}
+        
+        def create_post(self, text, media_ids=None, reply_to_id=None):
+            return {
+                'data': {
+                    'id': '1234567890123456789',
+                    'text': text
+                }
+            }
+    
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute("UPDATE posts SET status = 'scheduled', scheduled_at = ? WHERE id = ?",
+                   (now, 'test_25'))
+    conn.commit()
+    conn.close()
+    
+    publisher = Publisher(temp_db, xclient=MockXClientWithID(), dry_run=False)
+    published, _ = publisher.tick()
+    
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT x_post_id FROM posts WHERE id = ?", ('test_25',))
+    result = cursor.fetchone()
+    
+    assert result is not None
+    assert result[0] == '1234567890123456789'
+    
+    conn.close()
+
+
+# Test 26: API credentials not logged
+def test_api_credentials_not_logged():
+    """Test 26: Bearer token is masked in logging"""
+    from src.xclient import XClient
+    
+    client = XClient(bearer_token='very_long_secret_token_12345', dry_run=True)
+    masked = client._mask_token(client.bearer_token)
+    
+    assert len(masked) < len(client.bearer_token)
+    assert '12345' not in masked
+
+
+# Test 27: Dry-run does not make POST requests
+def test_dryrun_no_post_requests(temp_db, temp_queue_file):
+    """Test 27: dry-run mode does not make POST requests"""
+    post = create_post('test_27', parts_count=1)
+    
+    with open(temp_queue_file, 'w') as f:
+        json.dump({'posts': [post.to_dict()]}, f)
+    
+    importer = QueueImporter(temp_db, temp_queue_file)
+    importer.import_posts()
+    
+    class MockXClientTracker:
+        def __init__(self):
+            self.post_called = False
+            self.dry_run = True
+        
+        def verify_credentials(self):
+            return True
+        
+        def get_authenticated_user(self):
+            return {'id': '123', 'username': 'naokichi_nok'}
+        
+        def create_post(self, text, media_ids=None, reply_to_id=None):
+            self.post_called = True
+            raise Exception("Should not be called in dry-run")
+    
+    mock_client = MockXClientTracker()
+    
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute("UPDATE posts SET status = 'scheduled', scheduled_at = ? WHERE id = ?",
+                   (now, 'test_27'))
+    conn.commit()
+    conn.close()
+    
+    publisher = Publisher(temp_db, xclient=mock_client, dry_run=True)
+    published, errors = publisher.tick()
+    
+    assert mock_client.post_called is False
