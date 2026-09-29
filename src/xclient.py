@@ -58,7 +58,7 @@ class XClient:
         if bearer_token:
             self.bearer_token = bearer_token
         else:
-            self.bearer_token = os.getenv('X_API_BEARER_TOKEN')
+            self.bearer_token = os.getenv('X_BEARER_TOKEN')
 
         # OAuth 1.0a credentials (for posting)
         if api_key:

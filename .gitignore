@@ -29,3 +29,5 @@ env/
 *.sqlite3
 data/publisher.sqlite3
 .DS_Store
+.env
+.env.local
